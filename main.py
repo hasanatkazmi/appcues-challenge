@@ -5,12 +5,22 @@ import sqlite3
 import os
 import copy
 import BaseHTTPServer
+import logging
 from urlparse import parse_qs
 from threading import Lock, Thread
 from functools import wraps
 
 CACHE_SIZE = 1000000  # 1 MB
-AGE_TRIGGER = 8  # 8 sec
+TRIGGER_AGE = 8  # 8 sec
+
+
+def get_logger(level=logging.INFO, filename='/tmp/appcues-log'):
+    print "Please >tail -f {filename} to see logs. You can also change log level (dafult:INFO)"
+    FORMAT = '%(asctime)-15s %(message)s'
+    logging.basicConfig(format=FORMAT, level=level, filename=filename)
+    logger=logging.getLogger('Appcues-challenge')
+    return logger
+logger = get_logger()
 
 
 def run_async(func):
@@ -25,20 +35,25 @@ def run_async(func):
 
 shutdown_hook=False
 
+
 class DbManager:
-    def __init__(self, cache, db_path='numbers.db'):
+    def __init__(self, db_path='numbers.db'):
         self.db_path = db_path
         if self.is_db():
-            raw_input('Path {path} is not empty, enter any key to remove it'.format(path=db_path))
+            message = 'Path {path} is not empty, enter any key to remove it'.format(path=db_path)
+            logger.info(message)
+            raw_input(message)
             self.rm_db()
-        self.cache = cache
-        self.cache.register_expiry_callback(self.flush)
+            logger.info("Database removed")
+        self.create_db()
+        logger.info("Database created")
 
     def create_db(self):
         self.conn = sqlite3.connect(self.db_path)
         self.cur = self.conn.cursor()
         self.cur.execute('''CREATE TABLE numbers (key TEXT, value INTEGER DEFAULT 0);''')
         self.cur.execute('''CREATE UNIQUE INDEX numbers_key_index ON numbers (key);''')
+        logger.info("Database tables created!")
         self.conn.commit()
 
     def is_db(self):
@@ -47,77 +62,86 @@ class DbManager:
     def rm_db(self):
         os.remove(self.db_path)
 
+    def execute(self, statements):
+        logger.debug("Executing following statement: %s", statements)
+        self.cur.execute(statements)
+        self.conn.commit()
+
     def close(self):
         self.conn.close()
-
-    def flush(self):
-        '''write cache to db'''
-        self.is_db() or self.create_db()
-        sql_stmp = self.cache.flush()
-        print sql_stmp
-        if sql_stmp:
-            self.cur.execute(sql_stmp)
-            self.conn.commit()
-
-        global shutdown_hook
-        if shutdown_hook:
-            self.close()
 
 
 class InMemStore:
     key_val_store = {}
     store_lock = Lock()
-    mem_size = 0
+    mem_size = 0 # in bytes
     age = time.time()
 
     def __init__(self):
         pass
 
-    def put(self, key, val):
-        if key in self.key_val_store:
-            self.mem_size -= len(key) - len(str(self.key_val_store[key]))
+    def increment(self, key, val):
         self.store_lock.acquire()
+        logger.debug("Incrementing key: %s with value: %s", key, val)
         try:
-            self.key_val_store[key] = val
+            if key not in self.key_val_store:
+                self.key_val_store[key] = 0
+                self.mem_size += len(key)+32 #total bytes (max)
+            self.key_val_store[key] += val
         finally:
             self.store_lock.release()
-        self.mem_size += len(key) + len(str(val))
 
     def get_size(self):
         return self.mem_size
 
-    def flush(self):
+    def reset_size(self):
+        self.mem_size = 0
+
+    def flush_to_sql_statements(self):
         self.store_lock.acquire()
         try:
-            # tmp_store = copy.copy(self.key_val_store)
             tmp_store = self.key_val_store
-
             self.key_val_store = {}
-            self.age = time.time()
-            self.mem_size = 0
+            self.reset_age()
+            self.reset_size()
         finally:
             self.store_lock.release()
         sql_stmt = InMemStore.get_store_as_sql(tmp_store)
-        return sql_stmt
+        if len(tmp_store):
+            return sql_stmt
+        else: 
+            None
 
     def get_age(self):
         return time.time() - self.age
 
+    def reset_age(self):
+        self.age=time.time()
+
     @staticmethod
     def get_store_as_sql(store):
-        stmt = '''INSERT OR REPLACE INTO 'numbers' ('key', 'value') VALUES {tuples} ;'''
-        tuples = ','.join(["('"+k+"', "+str(v)+")" for k, v in store.iteritems()])
-        return None if store == {} else stmt.format(tuples=tuples)
+        stmt = '''INSERT OR REPLACE INTO numbers (key, value) VALUES {tuples};'''
+        one_tuple = '''('{key}', IFNULL((SELECT value FROM numbers WHERE key = '{key}'),0)+{value})'''
+        tuples = ','.join([one_tuple.format(key=k, value=v) for k, v in store.iteritems()])
+        return stmt.format(tuples=tuples)
 
-    @run_async
-    def register_expiry_callback(self, func):
-        global shutdown_hook
-        while True:
-            if self.get_age() > AGE_TRIGGER or self.get_size() >= CACHE_SIZE or shutdown_hook:
-                func()
-            if shutdown_hook:
-                break
-            time.sleep(1)
+
+@run_async
+def start_manager():
+    db = DbManager()
+    while True:
+        if store.get_age() > TRIGGER_AGE or store.get_size() >= CACHE_SIZE or shutdown_hook:
+            logger.info("Flushing local cache to database. Cache size: {bytes} bytes maximum.".format(bytes=store.get_size()))
+            sql_stmt = store.flush_to_sql_statements()
+            if sql_stmt:
+                db.execute(sql_stmt)
+
+        if shutdown_hook:
+            logger.info("Shutting down database.")
+            db.close()
+            break
+        time.sleep(1)    
+        # logger.debug("Checking if flush required.")
 
 
 class AppcuesServer(BaseHTTPServer.BaseHTTPRequestHandler):
@@ -145,24 +169,23 @@ class AppcuesServer(BaseHTTPServer.BaseHTTPRequestHandler):
             self.send_response(400)
             return
         # print key, value
-        self.store.put(key, value)
+        store.increment(key, value)
         self.send_response(200)       
 
     def log_message(self, format, *args):
-        return
-
-    store = InMemStore()
-    db = DbManager(store)
+        logger.debug(args)
 
 if __name__ == '__main__':
     server_port = 3333
     server = BaseHTTPServer.HTTPServer(('', server_port), AppcuesServer)
     print "Starting Server on port {port}".format(port=server_port)
     try:
+        store = InMemStore()
+        start_manager()
         server.serve_forever()
     except KeyboardInterrupt:
         print "Shutting down the server"
         server.socket.close()
-        shutdown_hook = True
         server.shutdown()
+        shutdown_hook = True
 
