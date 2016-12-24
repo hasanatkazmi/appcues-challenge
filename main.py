@@ -10,7 +10,8 @@ from urlparse import parse_qs
 from threading import Lock, Thread
 from functools import wraps
 
-CACHE_SIZE = 1000000  # 1 MB
+# Note: Don't increase cache size more than 10KB. Otherwise sql statement becomes too large.
+CACHE_SIZE = 10000  # 10 KB
 TRIGGER_AGE = 8  # 8 sec
 
 
@@ -18,8 +19,10 @@ def get_logger(level=logging.INFO, filename='/tmp/appcues-log'):
     print "Please >tail -f {filename} to see logs. You can also change log level (dafult:INFO)"
     FORMAT = '%(asctime)-15s %(message)s'
     logging.basicConfig(format=FORMAT, level=level, filename=filename)
-    logger=logging.getLogger('Appcues-challenge')
+    logger = logging.getLogger('Appcues-challenge')
     return logger
+
+
 logger = get_logger()
 
 
@@ -33,7 +36,7 @@ def run_async(func):
     return async_func
 
 
-shutdown_hook=False
+shutdown_hook = False
 
 
 class DbManager:
@@ -75,7 +78,7 @@ class DbManager:
 class InMemStore:
     key_val_store = {}
     store_lock = Lock()
-    mem_size = 0 # in bytes
+    mem_size = 0
     age = time.time()
 
     def __init__(self):
@@ -87,7 +90,7 @@ class InMemStore:
         try:
             if key not in self.key_val_store:
                 self.key_val_store[key] = 0
-                self.mem_size += len(key)+32 #total bytes (max)
+                self.mem_size += len(key) + 32  # total bytes (max)
             self.key_val_store[key] += val
         finally:
             self.store_lock.release()
@@ -110,14 +113,14 @@ class InMemStore:
         sql_stmt = InMemStore.get_store_as_sql(tmp_store)
         if len(tmp_store):
             return sql_stmt
-        else: 
+        else:
             None
 
     def get_age(self):
         return time.time() - self.age
 
     def reset_age(self):
-        self.age=time.time()
+        self.age = time.time()
 
     @staticmethod
     def get_store_as_sql(store):
@@ -132,7 +135,7 @@ def start_manager():
     db = DbManager()
     while True:
         if store.get_age() > TRIGGER_AGE or store.get_size() >= CACHE_SIZE or shutdown_hook:
-            logger.info("Flushing local cache to database. Cache size: {bytes} bytes maximum.".format(bytes=store.get_size()))
+            logger.info("Flushing local cache to database. Cache size: {bytes} bytes.".format(bytes=store.get_size()))
             sql_stmt = store.flush_to_sql_statements()
             if sql_stmt:
                 db.execute(sql_stmt)
@@ -141,7 +144,7 @@ def start_manager():
             logger.info("Shutting down database.")
             db.close()
             break
-        time.sleep(1)    
+        time.sleep(1)
 
 
 class AppcuesServer(BaseHTTPServer.BaseHTTPRequestHandler):
@@ -169,10 +172,11 @@ class AppcuesServer(BaseHTTPServer.BaseHTTPRequestHandler):
             self.send_response(400)
             return
         store.increment(key, value)
-        self.send_response(200)       
+        self.send_response(200)
 
     def log_message(self, format, *args):
         logger.debug(args)
+
 
 if __name__ == '__main__':
     server_port = 3333
@@ -187,4 +191,3 @@ if __name__ == '__main__':
         server.socket.close()
         server.shutdown()
         shutdown_hook = True
-
