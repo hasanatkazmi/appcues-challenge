@@ -64,6 +64,7 @@ class DbManager:
 
     def execute(self, statements):
         logger.debug("Executing following statement: %s", statements)
+        # TODO: check for SQL injection
         self.cur.execute(statements)
         self.conn.commit()
 
@@ -141,7 +142,6 @@ def start_manager():
             db.close()
             break
         time.sleep(1)    
-        # logger.debug("Checking if flush required.")
 
 
 class AppcuesServer(BaseHTTPServer.BaseHTTPRequestHandler):
@@ -168,7 +168,6 @@ class AppcuesServer(BaseHTTPServer.BaseHTTPRequestHandler):
         except ValueError:
             self.send_response(400)
             return
-        # print key, value
         store.increment(key, value)
         self.send_response(200)       
 
